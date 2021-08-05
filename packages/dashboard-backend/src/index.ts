@@ -38,12 +38,6 @@ export function getApiObj(request: FastifyRequest) {
 
 const server = fastify();
 
-startStaticServer(server);
-
-startDevworkspaceApi(server);
-
-startDevworkspaceWebsocketWatcher(server);
-
 server.register(require('fastify-cors'),
   (instance: any) => (req: any, callback: any) => {
   const regexp = new RegExp(baseApiPath);
@@ -70,6 +64,12 @@ server.addContentTypeParser(
     }
   }
 );
+
+startStaticServer(server);
+
+startDevworkspaceApi(server);
+
+startDevworkspaceWebsocketWatcher(server);
 
 startTemplateApi(server);
 
