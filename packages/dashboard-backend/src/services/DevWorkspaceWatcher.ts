@@ -48,8 +48,8 @@ class DevWorkspaceWatcher {
 
   async subscribe(): Promise<void> {
     try {
-      const { devWorkspaceWatcher } = await createDevWorkspaceClient(dwClientFactory, this.token);
-      const unsubscribeFunction = await devWorkspaceWatcher.watcher(this.namespace, this.callbacks).then((ret: { abort: Function }) => ret.abort);
+      const { devworkspaceApi } = await createDevWorkspaceClient(dwClientFactory, this.token);
+      const unsubscribeFunction = await devworkspaceApi.watchInNamespace(this.namespace, this.callbacks).then((ret: { abort: Function }) => ret.abort);
 
       if (this.unsubscribeFunction) {
         await this.unsubscribe();
