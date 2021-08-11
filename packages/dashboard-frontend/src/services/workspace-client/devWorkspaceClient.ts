@@ -11,21 +11,25 @@
  */
 
 import { inject, injectable } from 'inversify';
-import { isWebTerminal } from '../helpers/devworkspace';
+import devfileApi, { isDevWorkspace, isDevWorkspaceLike, isDevWorkspaceTemplate } from '../devfileApi';
+import { devWorkspaceKind, devWorkspaceRequiredFields } from '../devfileApi/devWorkspace';
+import { devWorkspaceTemplateRequiredFields } from '../devfileApi/devWorkspace/template';
 import { WorkspaceClient } from '.';
-import { RestApi as DevWorkspaceRestApi, IDevWorkspaceApi, IDevWorkspaceDevfile, IDevWorkspace, IDevWorkspaceTemplateApi, IDevWorkspaceTemplate, devWorkspaceApiGroup, devworkspaceSingularSubresource, devworkspaceVersion, ICheApi, Patch } from '@eclipse-che/devworkspace-client';
-import { DevWorkspaceStatus } from '../helpers/types';
+import { RestApi as DevWorkspaceRestApi, IDevWorkspaceApi, IDevWorkspaceTemplateApi, devWorkspaceApiGroup, devworkspaceSingularSubresource, devworkspaceVersion, ICheApi, IPatch, devfileToDevWorkspace, devworkspaceKind } from '@eclipse-che/devworkspace-client';
+import { AlertVariant } from '@patternfly/react-core';
+import { DevWorkspaceStatus, AlertItem } from '../helpers/types';
 import { KeycloakSetupService } from '../keycloak/setup';
 import { delay } from '../helpers/delay';
-import { RestApi } from '@eclipse-che/devworkspace-client/dist/browser';
 import { ThunkDispatch } from 'redux-thunk';
 import { State } from '../../store/Workspaces/devWorkspaces';
 import { Action } from 'redux';
 import { AppState, AppThunk } from '../../store';
-import { V1alpha2DevWorkspace, V1alpha2DevWorkspaceTemplate, V1alpha2DevWorkspaceSpecTemplate } from '@devfile/api';
 import { InversifyBinding } from '@eclipse-che/che-theia-devworkspace-handler/lib/inversify/inversify-binding';
 import { CheTheiaPluginsDevfileResolver } from '@eclipse-che/che-theia-devworkspace-handler/lib/devfile/che-theia-plugins-devfile-resolver';
 import { SidecarPolicy } from '@eclipse-che/che-theia-devworkspace-handler/lib/api/devfile-context';
+import { AppAlerts } from '../alerts/appAlerts';
+import { isWebTerminal } from '../helpers/devworkspace';
+
 export interface IStatusUpdate {
   error?: string;
   message?: string;
@@ -38,7 +42,7 @@ export const DEVWORKSPACE_NEXT_START_ANNOTATION = 'che.eclipse.org/next-start-cf
 
 export const DEVWORKSPACE_DEVFILE_SOURCE = 'che.eclipse.org/devfile-source';
 
-export const DEVWORKSPACE_METADATA_ANNOTATION =  'dw.metadata.annotations';
+export const DEVWORKSPACE_METADATA_ANNOTATION = 'dw.metadata.annotations';
 
 /**
  * This class manages the connection between the frontend and the devworkspace typescript library
@@ -50,7 +54,6 @@ export class DevWorkspaceClient extends WorkspaceClient {
   private dwtApi: IDevWorkspaceTemplateApi;
   private dwCheApi: ICheApi;
   private previousItems: Map<string, Map<string, IStatusUpdate>>;
-  private client: RestApi;
   private readonly maxStatusAttempts: number;
   private initializing: Promise<void>;
   private lastDevWorkspaceLog: Map<string, string>;
@@ -58,7 +61,10 @@ export class DevWorkspaceClient extends WorkspaceClient {
   private pluginRegistryUrlEnvName: string;
   private dashboardUrlEnvName: string;
 
-  constructor(@inject(KeycloakSetupService) keycloakSetupService: KeycloakSetupService) {
+  constructor(
+    @inject(KeycloakSetupService) keycloakSetupService: KeycloakSetupService,
+    @inject(AppAlerts) private appAlerts: AppAlerts,
+  ) {
     super(keycloakSetupService);
     this.axios.defaults.baseURL = '/api/unsupported/k8s';
     this.client = new DevWorkspaceRestApi(this.axios);
@@ -77,51 +83,97 @@ export class DevWorkspaceClient extends WorkspaceClient {
     return this.client.isDevWorkspaceApiEnabled();
   }
 
-  async getAllWorkspaces(defaultNamespace: string): Promise<IDevWorkspace[]> {
+  private _alertKeySuffix = 0;
+  private get alertKeySuffix(): number {
+    return this._alertKeySuffix++;
+  }
+
+  async getAllWorkspaces(defaultNamespace: string): Promise<devfileApi.DevWorkspace[]> {
     await this.initializing;
-    const workspaces = await this.dwApi.listInNamespace(defaultNamespace);
-    const availableWorkspaces: IDevWorkspace[] = [];
-    for (const workspace of workspaces) {
-      if (!isWebTerminal(workspace)) {
-        availableWorkspaces.push(workspace);
-      }
+    const workspacesList = await this.dwApi.listInNamespace(defaultNamespace);
+    let skipped = 0;
+    const availableWorkspaces: devfileApi.DevWorkspace[] = [];
+    workspacesList.items
+      .filter((workspace): workspace is devfileApi.DevWorkspace => {
+        if (!isDevWorkspaceLike(workspace)) {
+          skipped++;
+          console.warn(`Skip the retrieved resource as its "kind" is not equal to "${devworkspaceKind}": `, workspace);
+          return false;
+        }
+        if (!isDevWorkspace(workspace)) {
+          skipped++;
+          console.warn(`Skip the retrieved workspace as it lacks some of required properties (${devWorkspaceRequiredFields}): `, workspace);
+          return false;
+        }
+        if (isWebTerminal(workspace)) {
+          return false;
+        }
+        return true;
+      })
+      .forEach(workspace => availableWorkspaces.push(workspace));
+    if (skipped !== 0) {
+      const alert: AlertItem = {
+        key: 'skip-workspace-' + this.alertKeySuffix,
+        title: `Skipped ${skipped} resource(s). See the developer console for more information.`,
+        variant: AlertVariant.warning,
+      };
+      this.appAlerts.showAlert(alert);
     }
     return availableWorkspaces;
   }
 
-  async getWorkspaceByName(namespace: string, workspaceName: string): Promise<IDevWorkspace> {
+  async getWorkspaceByName(namespace: string, workspaceName: string): Promise<devfileApi.DevWorkspace> {
     let workspace = await this.dwApi.getByName(namespace, workspaceName);
     let attempted = 0;
-    while ((!workspace.status || !workspace.status.phase || !workspace.status.mainUrl) && attempted < this.maxStatusAttempts) {
+    while ((!workspace.status?.phase || !workspace.status?.mainUrl) && attempted < this.maxStatusAttempts) {
       workspace = await this.dwApi.getByName(namespace, workspaceName);
-      this.checkForDevWorkspaceError(workspace);
+      this.checkForDevWorkspaceError(workspace as devfileApi.DevWorkspace);
       attempted += 1;
       await delay();
     }
-    this.checkForDevWorkspaceError(workspace);
+    this.checkForDevWorkspaceError(workspace as devfileApi.DevWorkspace);
     const workspaceStatus = workspace.status;
     if (!workspaceStatus || !workspaceStatus.phase) {
       throw new Error(`Could not retrieve devworkspace status information from ${workspaceName} in namespace ${namespace}`);
     } else if (workspaceStatus.phase === DevWorkspaceStatus.RUNNING && !workspaceStatus?.mainUrl) {
       throw new Error('Could not retrieve mainUrl for the running workspace');
     }
+    if (!isDevWorkspaceLike(workspace)) {
+      console.error(`The retrieved resource "kind" is not equal to "${devworkspaceKind}": `, workspace);
+      throw new Error('Got error while retrieving the devworkspace. See the developer console for more information.');
+    }
+    if (!isDevWorkspace(workspace)) {
+      console.error(`The retrieved workspace lacks some of required properties (${devWorkspaceRequiredFields}): `, workspace);
+      throw new Error('Got error while retrieving the devworkspace. See the developer console for more information.');
+    }
     return workspace;
   }
 
-  async create(devfile: IDevWorkspaceDevfile, pluginsDevfile: IDevWorkspaceDevfile[], pluginRegistryUrl: string | undefined, optionalFilesContent: {
+  async create(devfile: devfileApi.Devfile, pluginsDevfile: devfileApi.Devfile[], pluginRegistryUrl: string | undefined, optionalFilesContent: {
     [fileName: string]: string
-  },): Promise<IDevWorkspace> {
+  }, defaultNamespace: string): Promise<devfileApi.DevWorkspace> {
     if (!devfile.components) {
       devfile.components = [];
     }
 
-    const createdWorkspace = await this.dwApi.create(devfile, 'che', false);
+    const workspace = devfileToDevWorkspace(devfile, 'che', false);
+    if (!workspace.metadata) {
+      workspace.metadata = {};
+    }
+    workspace.metadata.namespace = defaultNamespace;
+
+    const createdWorkspace = await this.dwApi.create(workspace);
+    if (!isDevWorkspace(createdWorkspace)) {
+      console.error(`The newly created devworkspace either has wrong "kind" (different from "${devworkspaceKind}") or lacks some of required properties (${devWorkspaceRequiredFields}): `, createdWorkspace);
+      throw new Error('Got error while creating a devworkspace. See the developer console for more information.');
+    }
+
     const namespace = createdWorkspace.metadata.namespace;
     const name = createdWorkspace.metadata.name;
-    const workspaceId = createdWorkspace.status.devworkspaceId;
+    const workspaceId = createdWorkspace.metadata.uid;
 
     const devfileGroupVersion = `${devWorkspaceApiGroup}/${devworkspaceVersion}`;
-    const devWorkspaceTemplates: V1alpha2DevWorkspaceTemplate[] = [];
+    const devWorkspaceTemplates: devfileApi.DevWorkspaceTemplateLike[] = [];
     for (const pluginDevfile of pluginsDevfile) {
       // TODO handle error in a proper way
       const pluginName = this.normalizePluginName(pluginDevfile.metadata.name, workspaceId);
@@ -138,7 +190,7 @@ export class DevWorkspaceClient extends WorkspaceClient {
       devWorkspaceTemplates.push(theiaDWT);
     }
 
-    const devWorkspace: V1alpha2DevWorkspace = createdWorkspace;
+    const devWorkspace = createdWorkspace;
     // call theia library to insert all the logic
     const inversifyBindings = new InversifyBinding();
     const container = await inversifyBindings.initBindings({
@@ -151,7 +203,7 @@ export class DevWorkspaceClient extends WorkspaceClient {
     const cheTheiaPluginsDevfileResolver = container.get(CheTheiaPluginsDevfileResolver);
 
     let sidecarPolicy: SidecarPolicy;
-    const devfileCheTheiaSidecarPolicy = (devfile as V1alpha2DevWorkspaceSpecTemplate).attributes?.['che-theia.eclipse.org/sidecar-policy'];
+    const devfileCheTheiaSidecarPolicy = (devfile as devfileApi.DevWorkspaceSpecTemplate).attributes?.['che-theia.eclipse.org/sidecar-policy'];
     if (devfileCheTheiaSidecarPolicy === 'USE_DEV_CONTAINER') {
       sidecarPolicy = SidecarPolicy.USE_DEV_CONTAINER;
     } else {
@@ -181,15 +233,15 @@ export class DevWorkspaceClient extends WorkspaceClient {
       }
 
       // Update the namespace
-      (template.metadata as any).namespace = namespace;
+      template.metadata.namespace = namespace;
 
       // Update owner reference (to allow automatic cleanup)
-      (template.metadata as any).ownerReferences = [
+      template.metadata.ownerReferences = [
         {
           apiVersion: devfileGroupVersion,
           kind: devworkspaceSingularSubresource,
           name: createdWorkspace.metadata.name,
-          uid: createdWorkspace.metadata.uid
+          uid: createdWorkspace.metadata.uid,
         }
       ];
 
@@ -212,7 +264,11 @@ export class DevWorkspaceClient extends WorkspaceClient {
         }
       }
 
-      const pluginDWT = await this.dwtApi.create(<IDevWorkspaceTemplate>template);
+      const pluginDWT = await this.dwtApi.create(<devfileApi.DevWorkspaceTemplate>template);
+      if (!isDevWorkspaceTemplate(pluginDWT)) {
+        console.error(`The newly created devworkspace template either has wrong "kind" or lacks some of the mandatory fields (${devWorkspaceTemplateRequiredFields}): `, workspace);
+        throw new Error('Got error while creating a devworkspace. See the developer console for more information.');
+      }
       this.addPlugin(createdWorkspace, pluginDWT.metadata.name, pluginDWT.metadata.namespace);
     }));
 
@@ -224,7 +280,12 @@ export class DevWorkspaceClient extends WorkspaceClient {
         value: createdWorkspace.spec,
       }
     ];
-    return this.dwApi.patch(namespace, name, patch);
+    const patchedWorkspace = await this.dwApi.patch(namespace, name, patch);
+    if (!isDevWorkspace(patchedWorkspace)) {
+      console.error(`The patched devworkspace either has wrong "kind" (different from "${devWorkspaceKind}") or lacks some of the mandatory fields (${devWorkspaceRequiredFields}): `, patchedWorkspace);
+      throw new Error('Got error while creating a devworkspace. See the developer console for more information.');
+    }
+    return patchedWorkspace;
   }
 
   /**
@@ -238,17 +299,17 @@ export class DevWorkspaceClient extends WorkspaceClient {
    * @param workspace The DevWorkspace you want to update
    * @param plugins The plugins you want to inject into the devworkspace
    */
-  async update(workspace: IDevWorkspace, plugins: IDevWorkspaceDevfile[]): Promise<IDevWorkspace> {
+  async update(workspace: devfileApi.DevWorkspace, plugins: devfileApi.Devfile[]): Promise<devfileApi.DevWorkspace> {
     // Take the devworkspace with no plugins and then inject them
     for (const plugin of plugins) {
-      const pluginName = this.normalizePluginName(plugin.metadata.name, workspace.status.devworkspaceId);
+      const pluginName = this.normalizePluginName(plugin.metadata.name, workspace.metadata.uid);
       this.addPlugin(workspace, pluginName, workspace.metadata.namespace);
     }
 
     const namespace = workspace.metadata.namespace;
     const name = workspace.metadata.name;
 
-    const patch: Patch[] = [];
+    const patch: IPatch[] = [];
 
     if (workspace.metadata.annotations && workspace.metadata.annotations[DEVWORKSPACE_NEXT_START_ANNOTATION]) {
 
@@ -279,7 +340,7 @@ export class DevWorkspaceClient extends WorkspaceClient {
       const onClusterWorkspace = await this.getWorkspaceByName(namespace, name);
 
       // If the workspace currently has DEVWORKSPACE_NEXT_START_ANNOTATION then delete it since we are starting a devworkspace normally
-      if (onClusterWorkspace.metadata.annotations && onClusterWorkspace.metadata.annotations[DEVWORKSPACE_NEXT_START_ANNOTATION]) {
+      if (onClusterWorkspace.metadata?.annotations?.[DEVWORKSPACE_NEXT_START_ANNOTATION]) {
         // We have to escape the slash when removing the annotation and ~1 is used as the escape character https://tools.ietf.org/html/rfc6902#appendix-A.14
         const escapedAnnotation = DEVWORKSPACE_NEXT_START_ANNOTATION.replace('/', '~1');
         patch.push(
@@ -291,7 +352,12 @@ export class DevWorkspaceClient extends WorkspaceClient {
       }
     }
 
-    return this.dwApi.patch(namespace, name, patch);
+    const patchedWorkspace = await this.dwApi.patch(namespace, name, patch);
+    if (!isDevWorkspace(patchedWorkspace)) {
+      console.error(`The patched devworkspace either has wrong "kind" (different from "${devWorkspaceKind}") or lacks some of the mandatory fields (${devWorkspaceRequiredFields}): `, patchedWorkspace);
+      throw new Error('Got error while creating a devworkspace. See the developer console for more information.');
+    }
+    return patchedWorkspace;
   }
 
   /**
@@ -308,7 +374,8 @@ export class DevWorkspaceClient extends WorkspaceClient {
     await this.dwApi.delete(namespace, name);
   }
 
-  async changeWorkspaceStatus(namespace: string, name: string, started: boolean): Promise<IDevWorkspace> {
+  async changeWorkspaceStatus(namespace: string, name: string, started: boolean): Promise<devfileApi.DevWorkspace> {
+    // todo it seems changeStatus gone from dwAPI
     const changedWorkspace = await this.dwApi.changeStatus(namespace, name, started);
     if (!started && changedWorkspace.status?.devworkspaceId) {
       this.lastDevWorkspaceLog.delete(changedWorkspace.status.devworkspaceId);
@@ -322,7 +389,7 @@ export class DevWorkspaceClient extends WorkspaceClient {
    * @param workspace A devworkspace
    * @param pluginName The name of the plugin
    */
-  private addPlugin(workspace: IDevWorkspace, pluginName: string, namespace: string) {
+  private addPlugin(workspace: devfileApi.DevWorkspace, pluginName: string, namespace: string) {
     if (!workspace.spec.template.components) {
       workspace.spec.template.components = [];
     }
@@ -355,9 +422,9 @@ export class DevWorkspaceClient extends WorkspaceClient {
   subscribeToNamespace(
     defaultNamespace: string,
     callbacks: {
-      updateDevWorkspaceStatus: (workspace: IDevWorkspace, message: IStatusUpdate) => AppThunk<Action, void>,
+      updateDevWorkspaceStatus: (workspace: devfileApi.DevWorkspace, message: IStatusUpdate) => AppThunk<Action, void>,
       updateDeletedDevWorkspaces: (deletedWorkspacesIds: string[]) => AppThunk<Action, void>,
-      updateAddedDevWorkspaces: (workspace: IDevWorkspace[]) => AppThunk<Action, void>,
+      updateAddedDevWorkspaces: (workspace: devfileApi.DevWorkspace[]) => AppThunk<Action, void>,
     },
     dispatch: ThunkDispatch<State, undefined, Action>,
     getState: () => AppState,
@@ -365,12 +432,12 @@ export class DevWorkspaceClient extends WorkspaceClient {
     setInterval(async () => {
       // This is a temporary solution until websockets work. Ideally we should just have a websocket connection here.
       const devworkspaces = await this.getAllWorkspaces(defaultNamespace);
-      devworkspaces.forEach((devworkspace: IDevWorkspace) => {
+      devworkspaces.forEach((devworkspace: devfileApi.DevWorkspace) => {
         const statusUpdate = this.createStatusUpdate(devworkspace);
 
-        const message = devworkspace.status.message;
+        const message = devworkspace.status?.message;
         if (message) {
-          const workspaceId = devworkspace.status.devworkspaceId;
+          const workspaceId = devworkspace.metadata.uid;
           const lastMessage = this.lastDevWorkspaceLog.get(workspaceId);
 
           // Only add new messages we haven't seen before
@@ -383,10 +450,10 @@ export class DevWorkspaceClient extends WorkspaceClient {
       });
 
       const devWorkspacesIds: string[] = [];
-      const addedDevWorkspaces: IDevWorkspace[] = [];
+      const addedDevWorkspaces: devfileApi.DevWorkspace[] = [];
       devworkspaces.forEach(workspace => {
-        devWorkspacesIds.push(workspace.status.devworkspaceId);
-        if (this.devWorkspacesIds.indexOf(workspace.status.devworkspaceId) === -1) {
+        devWorkspacesIds.push(workspace.metadata.uid);
+        if (this.devWorkspacesIds.indexOf(workspace.metadata.uid) === -1) {
           addedDevWorkspaces.push(workspace);
         }
       });
@@ -409,13 +476,13 @@ export class DevWorkspaceClient extends WorkspaceClient {
   /**
    * Create a status update between the previously recieving DevWorkspace with a certain workspace id
    * and the new DevWorkspace
-   * @param devworkspace The incoming DevWorkspace
+   * @param devworkspace The incoming devfileApi.DevWorkspace
    */
-  private createStatusUpdate(devworkspace: IDevWorkspace): IStatusUpdate {
+  private createStatusUpdate(devworkspace: devfileApi.DevWorkspace): IStatusUpdate {
     const namespace = devworkspace.metadata.namespace;
-    const workspaceId = devworkspace.status.devworkspaceId;
+    const workspaceId = devworkspace.metadata.uid;
     // Starting devworkspaces don't have status defined
-    const status = typeof devworkspace.status.phase === 'string'
+    const status = typeof devworkspace.status?.phase === 'string'
       ? devworkspace.status.phase
       : DevWorkspaceStatus.STARTING;
 
@@ -444,14 +511,14 @@ export class DevWorkspaceClient extends WorkspaceClient {
     }
   }
 
-  checkForDevWorkspaceError(devworkspace: IDevWorkspace) {
+  checkForDevWorkspaceError(devworkspace: devfileApi.DevWorkspace) {
     const currentPhase = devworkspace.status?.phase;
     if (currentPhase && currentPhase === DevWorkspaceStatus.FAILED) {
-      const message = devworkspace.status.message;
+      const message = devworkspace.status?.message;
       if (message) {
-        throw new Error(devworkspace.status.message);
+        throw new Error(message);
       }
-      throw new Error('Unknown error occured when trying to process the devworkspace');
+      throw new Error('Unknown error occurred when trying to process the devworkspace');
     }
   }
 }

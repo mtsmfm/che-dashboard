@@ -12,18 +12,18 @@
 
 import {
   devfileToDevWorkspace,
+  devworkspaceKind,
   devWorkspaceToDevfile,
-  IDevWorkspace,
-  IDevWorkspaceDevfile,
 } from '@eclipse-che/devworkspace-client';
 import { attributesToType, typeToAttributes } from '../storageTypes';
 import { DevWorkspaceStatus, WorkspaceStatus } from '../helpers/types';
 import { DEVWORKSPACE_NEXT_START_ANNOTATION } from '../workspace-client/devWorkspaceClient';
+import devfileApi, { isDevfile, isDevWorkspace } from '../devfileApi';
 
 const ROUTING_CLASS = 'che';
 
 export interface Workspace {
-  readonly ref: che.Workspace | IDevWorkspace;
+  readonly ref: che.Workspace | devfileApi.DevWorkspace;
 
   readonly id: string;
   name: string;
@@ -33,7 +33,7 @@ export interface Workspace {
   readonly updated: number;
   status: WorkspaceStatus | DevWorkspaceStatus;
   readonly ideUrl?: string;
-  devfile: che.WorkspaceDevfile | IDevWorkspaceDevfile;
+  devfile: che.WorkspaceDevfile | devfileApi.Devfile;
   storageType: che.WorkspaceStorageType;
   readonly projects: string[];
   readonly isStarting: boolean;
@@ -43,11 +43,11 @@ export interface Workspace {
   readonly hasError: boolean;
 }
 
-export class WorkspaceAdapter<T extends che.Workspace | IDevWorkspace> implements Workspace {
-  private readonly workspace: T;
+export class WorkspaceAdapter<T extends che.Workspace | devfileApi.DevWorkspace> implements Workspace {
+  private workspace: T;
 
   constructor(workspace: T) {
-    if (isWorkspaceV1(workspace) || isWorkspaceV2(workspace)) {
+    if (isCheWorkspace(workspace) || isDevWorkspace(workspace)) {
       this.workspace = workspace;
     } else {
       console.error('Unexpected workspace object shape:', workspace);
@@ -60,23 +60,23 @@ export class WorkspaceAdapter<T extends che.Workspace | IDevWorkspace> implement
   }
 
   get id(): string {
-    if (isWorkspaceV1(this.workspace)) {
+    if (isCheWorkspace(this.workspace)) {
       return this.workspace.id;
     } else {
-      return (this.workspace as IDevWorkspace).status.devworkspaceId;
+      return (this.workspace as devfileApi.DevWorkspace).metadata.uid;
     }
   }
 
   get name(): string {
-    if (isWorkspaceV1(this.workspace)) {
+    if (isCheWorkspace(this.workspace)) {
       return this.workspace.devfile.metadata.name || '';
     } else {
-      return (this.workspace as IDevWorkspace).metadata.name;
+      return (this.workspace as devfileApi.DevWorkspace).metadata.name;
     }
   }
 
   set name(name: string) {
-    if (isWorkspaceV1(this.workspace)) {
+    if (isCheWorkspace(this.workspace)) {
       this.workspace.devfile.metadata.name = name;
     } else {
       console.error('Not implemented: set name of the devworkspace.');
@@ -84,36 +84,36 @@ export class WorkspaceAdapter<T extends che.Workspace | IDevWorkspace> implement
   }
 
   get namespace(): string {
-    if (isWorkspaceV1(this.workspace)) {
+    if (isCheWorkspace(this.workspace)) {
       return this.workspace.namespace || '';
     } else {
-      return (this.workspace as IDevWorkspace).metadata.namespace;
+      return (this.workspace as devfileApi.DevWorkspace).metadata.namespace;
     }
   }
 
   get infrastructureNamespace(): string {
-    if (isWorkspaceV1(this.workspace)) {
+    if (isCheWorkspace(this.workspace)) {
       return this.workspace.attributes?.infrastructureNamespace || '';
     } else {
-      return (this.workspace as IDevWorkspace).metadata.namespace;
+      return (this.workspace as devfileApi.DevWorkspace).metadata.namespace;
     }
   }
 
+  // todo maybe return Date instead of timestamp?
   get created(): number {
-    if (isWorkspaceV1(this.workspace)) {
+    if (isCheWorkspace(this.workspace)) {
       return parseInt(this.workspace.attributes?.created || '', 10) || 0;
     } else {
-      const reference = this.workspace as IDevWorkspace;
-      const timestamp = parseInt(reference.metadata.creationTimestamp || '0', 10);
-      if (!timestamp) {
+      const reference = this.workspace as devfileApi.DevWorkspace;
+      if (!reference.metadata.creationTimestamp) {
         return 0;
       }
-      return new Date(timestamp).valueOf();
+      return reference.metadata.creationTimestamp.valueOf();
     }
   }
 
   get updated(): number {
-    if (isWorkspaceV1(this.workspace)) {
+    if (isCheWorkspace(this.workspace)) {
       return parseInt(this.workspace.attributes?.updated || '', 10) || 0;
     } else {
       return this.created;
@@ -121,55 +121,55 @@ export class WorkspaceAdapter<T extends che.Workspace | IDevWorkspace> implement
   }
 
   get status(): WorkspaceStatus | DevWorkspaceStatus {
-    if (isWorkspaceV1(this.workspace)) {
+    if (isCheWorkspace(this.workspace)) {
       return this.workspace.status as WorkspaceStatus;
     } else {
-      return (this.workspace as IDevWorkspace).status?.phase as DevWorkspaceStatus;
+      return (this.workspace as devfileApi.DevWorkspace).status?.phase as DevWorkspaceStatus;
     }
   }
 
   get isStarting(): boolean {
-    if (isWorkspaceV1(this.workspace)) {
+    if (isCheWorkspace(this.workspace)) {
       return this.workspace.status as WorkspaceStatus === WorkspaceStatus.STARTING;
     } else {
-      return (this.workspace as IDevWorkspace).status?.phase as DevWorkspaceStatus === DevWorkspaceStatus.STARTING;
+      return (this.workspace as devfileApi.DevWorkspace).status?.phase as DevWorkspaceStatus === DevWorkspaceStatus.STARTING;
     }
   }
 
   get isStopped(): boolean {
-    if (isWorkspaceV1(this.workspace)) {
+    if (isCheWorkspace(this.workspace)) {
       return this.workspace.status as WorkspaceStatus === WorkspaceStatus.STOPPED;
     } else {
-      return (this.workspace as IDevWorkspace).status?.phase as DevWorkspaceStatus === DevWorkspaceStatus.STOPPED;
+      return (this.workspace as devfileApi.DevWorkspace).status?.phase as DevWorkspaceStatus === DevWorkspaceStatus.STOPPED;
     }
   }
 
   get isStopping(): boolean {
-    if (isWorkspaceV1(this.workspace)) {
+    if (isCheWorkspace(this.workspace)) {
       return this.workspace.status as WorkspaceStatus === WorkspaceStatus.STOPPING;
     } else {
-      return (this.workspace as IDevWorkspace).status?.phase as DevWorkspaceStatus === DevWorkspaceStatus.STOPPING;
+      return (this.workspace as devfileApi.DevWorkspace).status?.phase as DevWorkspaceStatus === DevWorkspaceStatus.STOPPING;
     }
   }
 
   get isRunning(): boolean {
-    if (isWorkspaceV1(this.workspace)) {
+    if (isCheWorkspace(this.workspace)) {
       return this.workspace.status as WorkspaceStatus === WorkspaceStatus.RUNNING;
     } else {
-      return (this.workspace as IDevWorkspace).status?.phase as DevWorkspaceStatus === DevWorkspaceStatus.RUNNING;
+      return (this.workspace as devfileApi.DevWorkspace).status?.phase as DevWorkspaceStatus === DevWorkspaceStatus.RUNNING;
     }
   }
 
   get hasError(): boolean {
-    if (isWorkspaceV1(this.workspace)) {
+    if (isCheWorkspace(this.workspace)) {
       return this.workspace.status as WorkspaceStatus === WorkspaceStatus.ERROR;
     } else {
-      return (this.workspace as IDevWorkspace).status?.phase as DevWorkspaceStatus === DevWorkspaceStatus.FAILED;
+      return (this.workspace as devfileApi.DevWorkspace).status?.phase as DevWorkspaceStatus === DevWorkspaceStatus.FAILED;
     }
   }
 
   get ideUrl(): string | undefined {
-    if (isWorkspaceV1(this.workspace)) {
+    if (isCheWorkspace(this.workspace)) {
       const runtime = this.workspace.runtime;
       if (!runtime || !runtime.machines) {
         return;
@@ -184,12 +184,12 @@ export class WorkspaceAdapter<T extends che.Workspace | IDevWorkspace> implement
         }
       }
     } else {
-      return (this.workspace as IDevWorkspace).status.mainUrl;
+      return (this.workspace as devfileApi.DevWorkspace).status?.mainUrl;
     }
   }
 
   get storageType(): che.WorkspaceStorageType {
-    if (isWorkspaceV1(this.workspace)) {
+    if (isCheWorkspace(this.workspace)) {
       return attributesToType(this.workspace.devfile.attributes);
     } else {
       console.error('Not implemented: get storage type of the devworkspace.');
@@ -198,7 +198,7 @@ export class WorkspaceAdapter<T extends che.Workspace | IDevWorkspace> implement
   }
 
   set storageType(type: che.WorkspaceStorageType) {
-    if (isWorkspaceV1(this.workspace)) {
+    if (isCheWorkspace(this.workspace)) {
       const attributes = typeToAttributes(type);
       if (!this.workspace.devfile.attributes) {
         this.workspace.devfile.attributes = {};
@@ -217,37 +217,44 @@ export class WorkspaceAdapter<T extends che.Workspace | IDevWorkspace> implement
     }
   }
 
-  get devfile(): che.WorkspaceDevfile | IDevWorkspaceDevfile {
-    if (isWorkspaceV1(this.workspace)) {
-      return this.workspace.devfile as T extends che.Workspace ? che.WorkspaceDevfile : IDevWorkspaceDevfile;
+  get devfile(): che.WorkspaceDevfile | devfileApi.Devfile {
+    if (isCheWorkspace(this.workspace)) {
+      return this.workspace.devfile as T extends che.Workspace ? che.WorkspaceDevfile : devfileApi.Devfile;
     } else {
-      const currentWorkspace = this.workspace as IDevWorkspace;
+      const currentWorkspace = this.workspace as devfileApi.DevWorkspace;
       if (currentWorkspace.metadata.annotations && currentWorkspace.metadata.annotations[DEVWORKSPACE_NEXT_START_ANNOTATION]) {
-        return devWorkspaceToDevfile(JSON.parse(currentWorkspace.metadata.annotations[DEVWORKSPACE_NEXT_START_ANNOTATION]));
+        const devfile = devWorkspaceToDevfile(JSON.parse(currentWorkspace.metadata.annotations[DEVWORKSPACE_NEXT_START_ANNOTATION]));
+        if (isDevfile(devfile)) {
+          return devfile;
+        }
+      }
+      return devWorkspaceToDevfile(currentWorkspace) as devfileApi.Devfile;
+    }
+  }
+
+  set devfile(devfile: che.WorkspaceDevfile | devfileApi.Devfile) {
+    if (isCheWorkspace(this.workspace)) {
+      this.workspace.devfile = devfile as che.WorkspaceDevfile;
+    } else {
+      const converted = devfileToDevWorkspace(
+        devfile as devfileApi.Devfile,
+        ROUTING_CLASS,
+        this.status === DevWorkspaceStatus.RUNNING
+      );
+      if (isDevWorkspace(converted)) {
+        (this.workspace as devfileApi.DevWorkspace) = converted;
       } else {
-        return devWorkspaceToDevfile(currentWorkspace) as T extends che.Workspace ? che.WorkspaceDevfile : IDevWorkspaceDevfile;
+        console.error(`WorkspaceAdapter: the received devworkspace either has wrong "kind" (not ${devworkspaceKind}) or lacks some of mandatory : `, converted);
       }
     }
   }
 
-  set devfile(devfile: che.WorkspaceDevfile | IDevWorkspaceDevfile) {
-    if (isWorkspaceV1(this.workspace)) {
-      this.workspace.devfile = devfile as che.WorkspaceDevfile;
-    } else {
-      (this.workspace as IDevWorkspace) = devfileToDevWorkspace(
-        devfile as IDevWorkspaceDevfile,
-        ROUTING_CLASS,
-        this.status === DevWorkspaceStatus.RUNNING
-      );
-    }
-  }
-
   get projects(): string[] {
-    if (isWorkspaceV1(this.workspace)) {
+    if (isCheWorkspace(this.workspace)) {
       return (this.workspace.devfile.projects || [])
         .map(project => project.name);
     } else {
-      const devfile = devWorkspaceToDevfile(this.workspace as IDevWorkspace);
+      const devfile = devWorkspaceToDevfile(this.workspace as devfileApi.DevWorkspace);
       return (devfile.projects || [])
         .map(project => project.name);
     }
@@ -255,24 +262,16 @@ export class WorkspaceAdapter<T extends che.Workspace | IDevWorkspace> implement
 
 }
 
-export function convertWorkspace<T extends che.Workspace | IDevWorkspace>(workspace: T): Workspace {
+export function convertWorkspace<T extends che.Workspace | devfileApi.DevWorkspace>(workspace: T): Workspace {
   return new WorkspaceAdapter(workspace);
 }
 
-export function isWorkspaceV1(workspace: che.Workspace | IDevWorkspace): workspace is che.Workspace {
+export function isCheWorkspace(workspace: che.Workspace | devfileApi.DevWorkspace): workspace is che.Workspace {
   return (workspace as che.Workspace).id !== undefined
     && (workspace as che.Workspace).devfile !== undefined
     && (workspace as che.Workspace).status !== undefined;
 }
 
-export function isWorkspaceV2(workspace: che.Workspace | IDevWorkspace): workspace is IDevWorkspace {
-  return (workspace as IDevWorkspace).kind === 'DevWorkspace';
-}
-
-export function isDevfileV1(devfile: che.WorkspaceDevfile | IDevWorkspaceDevfile): devfile is che.WorkspaceDevfile {
-  return !isDevfileV2(devfile);
-}
-
-export function isDevfileV2(devfile: che.WorkspaceDevfile | IDevWorkspaceDevfile): devfile is IDevWorkspaceDevfile {
-  return (devfile as IDevWorkspaceDevfile).schemaVersion !== undefined;
+export function isCheDevfile(devfile: che.WorkspaceDevfile | devfileApi.Devfile): devfile is che.WorkspaceDevfile {
+  return !isDevfile(devfile);
 }

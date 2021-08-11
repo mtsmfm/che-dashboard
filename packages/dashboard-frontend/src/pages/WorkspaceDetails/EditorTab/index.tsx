@@ -28,8 +28,8 @@ import * as lodash from 'lodash';
 import { safeLoad } from 'js-yaml';
 import DevfileEditor, { DevfileEditor as Editor } from '../../../components/DevfileEditor';
 import EditorTools from './EditorTools';
-import { convertWorkspace, isWorkspaceV1, isWorkspaceV2, Workspace, isDevfileV2 } from '../../../services/workspaceAdapter';
-import { IDevWorkspace, IDevWorkspaceDevfile } from '@eclipse-che/devworkspace-client';
+import { convertWorkspace, isCheWorkspace, Workspace } from '../../../services/workspaceAdapter';
+import devfileApi, { isDevfile, isDevWorkspace } from '../../../services/devfileApi';
 import { DevWorkspaceStatus } from '../../../services/helpers/types';
 import { DevWorkspaceClient, DEVWORKSPACE_NEXT_START_ANNOTATION } from '../../../services/workspace-client/devWorkspaceClient';
 import { container } from '../../../inversify.config';
@@ -43,7 +43,7 @@ type Props = {
 };
 
 type State = {
-  devfile: che.WorkspaceDevfile | IDevWorkspaceDevfile;
+  devfile: che.WorkspaceDevfile | devfileApi.Devfile;
   hasChanges: boolean;
   hasRequestErrors: boolean;
   currentRequestError: string;
@@ -54,7 +54,7 @@ type State = {
 };
 
 export class EditorTab extends React.PureComponent<Props, State> {
-  private originDevfile: che.WorkspaceDevfile | IDevWorkspaceDevfile;
+  private originDevfile: che.WorkspaceDevfile | devfileApi.Devfile;
   private readonly devfileEditorRef: React.RefObject<Editor>;
   private devworkspaceClient: DevWorkspaceClient;
 
@@ -127,16 +127,16 @@ export class EditorTab extends React.PureComponent<Props, State> {
             actions={[
               <Button key="yes" variant="primary" onClick={() => this.saveDevfile()}>
                 Yes
-            </Button>,
+              </Button>,
               <Button key="no" variant="secondary" onClick={() => this.devfileConfirmationCancelation()}>
                 No
-            </Button>,
+              </Button>,
             ]}
           >
             <TextContent>
               <Text>
                 Would you like to restart the workspace with the changes?
-            </Text>
+              </Text>
             </TextContent>
           </Modal>
         )}
@@ -202,12 +202,12 @@ export class EditorTab extends React.PureComponent<Props, State> {
     }
     try {
       await this.checkForModifiedClusterDevWorkspace();
-      const devworkspace = this.props.workspace.ref as IDevWorkspace;
+      const devworkspace = this.props.workspace.ref as devfileApi.DevWorkspace;
       const convertedDevWorkspace = convertWorkspace(this.props.workspace.ref);
       convertedDevWorkspace.devfile = devfile;
       // Store the devfile in here
-      (convertedDevWorkspace.ref as IDevWorkspace).metadata.annotations = {
-        [DEVWORKSPACE_NEXT_START_ANNOTATION]: JSON.stringify((convertedDevWorkspace.ref as IDevWorkspace)),
+      (convertedDevWorkspace.ref as devfileApi.DevWorkspace).metadata.annotations = {
+        [DEVWORKSPACE_NEXT_START_ANNOTATION]: JSON.stringify((convertedDevWorkspace.ref as devfileApi.DevWorkspace)),
       };
       convertedDevWorkspace.ref.status = devworkspace.status;
       this.props.onDevWorkspaceWarning();
@@ -224,7 +224,7 @@ export class EditorTab extends React.PureComponent<Props, State> {
     }
   }
 
-  private updateEditor(devfile: che.WorkspaceDevfile | IDevWorkspaceDevfile): void {
+  private updateEditor(devfile: che.WorkspaceDevfile | devfileApi.Devfile): void {
     if (!devfile) {
       return;
     }
@@ -257,7 +257,7 @@ export class EditorTab extends React.PureComponent<Props, State> {
   }
 
   private async onSave(): Promise<void> {
-    if (isWorkspaceV1(this.props.workspace.ref) || this.props.workspace.status !== DevWorkspaceStatus.RUNNING.toUpperCase()) {
+    if (isCheWorkspace(this.props.workspace.ref) || this.props.workspace.status !== DevWorkspaceStatus.RUNNING.toUpperCase()) {
       this.saveDevfile();
     } else {
       this.setState({
@@ -272,7 +272,7 @@ export class EditorTab extends React.PureComponent<Props, State> {
    * @param workspace The Currne
    */
   private async checkForModifiedClusterDevWorkspace(): Promise<void> {
-    const currentDevWorkspace = this.props.workspace.ref as IDevWorkspace;
+    const currentDevWorkspace = this.props.workspace.ref as devfileApi.DevWorkspace;
     const clusterDevWorkspace = await this.devworkspaceClient.getWorkspaceByName(currentDevWorkspace.metadata.namespace, currentDevWorkspace.metadata.name);
     if (!lodash.isEqual(clusterDevWorkspace.spec.template, currentDevWorkspace.spec.template)) {
       throw new Error('Could not save devfile to cluster. The clusters devfile and the incoming devfile are different. Please reload the page to get an updated devfile.');
@@ -291,7 +291,7 @@ export class EditorTab extends React.PureComponent<Props, State> {
     if (!devfile.metadata.name) {
       devfile.metadata.name = workspaceCopy.name;
     }
-    if (isDevfileV2(devfile) && !devfile.metadata.namespace) {
+    if (isDevfile(devfile) && !devfile.metadata.namespace) {
       devfile.metadata.namespace = workspaceCopy.namespace;
     }
 
@@ -299,10 +299,10 @@ export class EditorTab extends React.PureComponent<Props, State> {
     this.setState({ hasChanges: false });
     try {
 
-      if (isWorkspaceV2(workspaceCopy.ref)) {
+      if (isDevWorkspace(workspaceCopy.ref)) {
         await this.checkForModifiedClusterDevWorkspace();
         // We need to manually re-attach devworkspace id so that we can re-use it to re-add default plugins to the devworkspace custom resource
-        const dw = this.props.workspace.ref as IDevWorkspace;
+        const dw = this.props.workspace.ref as devfileApi.DevWorkspace;
         workspaceCopy.ref.status = dw.status;
       }
 
@@ -320,14 +320,14 @@ export class EditorTab extends React.PureComponent<Props, State> {
     });
   }
 
-  private sortKeysInObject(obj: che.WorkspaceDevfile | IDevWorkspaceDevfile): che.WorkspaceDevfile | IDevWorkspaceDevfile {
-    return Object.keys(obj).sort().reduce((result: che.WorkspaceDevfile | IDevWorkspaceDevfile, key: string) => {
+  private sortKeysInObject(obj: che.WorkspaceDevfile | devfileApi.Devfile): che.WorkspaceDevfile | devfileApi.Devfile {
+    return Object.keys(obj).sort().reduce((result: che.WorkspaceDevfile | devfileApi.Devfile, key: string) => {
       result[key] = obj[key];
       return result;
-    }, {} as che.WorkspaceDevfile | IDevWorkspaceDevfile);
+    }, {} as che.WorkspaceDevfile | devfileApi.Devfile);
   }
 
-  private areEqual(a: che.WorkspaceDevfile | IDevWorkspaceDevfile, b: che.WorkspaceDevfile | IDevWorkspaceDevfile): boolean {
+  private areEqual(a: che.WorkspaceDevfile | devfileApi.Devfile, b: che.WorkspaceDevfile | devfileApi.Devfile): boolean {
     return JSON.stringify(this.sortKeysInObject(a)) == JSON.stringify(this.sortKeysInObject(b as che.WorkspaceDevfile));
   }
 }
