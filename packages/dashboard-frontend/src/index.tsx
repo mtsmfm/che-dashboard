@@ -48,7 +48,7 @@ async function startApp(): Promise<void> {
   }
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/service-worker.js');
+    navigator.serviceWorker.register('./service-worker.js');
   }
 
   ReactDOM.render(<Provider store={store}><App history={history} /></Provider>, ROOT);
