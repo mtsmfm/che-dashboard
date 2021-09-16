@@ -12,6 +12,7 @@
 
 const HtmlWebpackPlugin = require('html-webpack-plugin');
 const { CleanWebpackPlugin } = require('clean-webpack-plugin');
+const { InjectManifest } = require('workbox-webpack-plugin');
 const stylus_plugin = require('poststylus');
 const stylusLoader = require('stylus-loader');
 const path = require('path');
@@ -121,6 +122,10 @@ const config = {
   plugins: [
     new HtmlWebpackPlugin({
       template: './index.html'
+    }),
+    new InjectManifest({
+      swSrc: './src/service-worker',
+      swDest: 'service-worker.js'
     }),
     new stylusLoader.OptionsPlugin({
       default: {
